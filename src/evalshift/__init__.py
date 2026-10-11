@@ -29,7 +29,7 @@ from evalshift.trace.migrate import (
 )
 from evalshift.trace.schema import SCHEMA_VERSION
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "SCHEMA_VERSION",
