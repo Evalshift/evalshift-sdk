@@ -29,6 +29,7 @@ def _isolate_config(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "EVALSHIFT_SAMPLE_RATE",
         "EVALSHIFT_CAPTURE_STORE",
         "EVALSHIFT_SINK",
+        "EVALSHIFT_CAPTURE_LAYOUT",
     ):
         monkeypatch.delenv(var, raising=False)
     reset_config()
@@ -52,6 +53,7 @@ def read_captures(tmp_path: Path) -> CaptureReader:
         suite_dir = tmp_path / "captures" / suite
         if not suite_dir.exists():
             return []
-        return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(suite_dir.glob("*.json"))]
+        paths = sorted(suite_dir.glob("*.json")) + sorted(suite_dir.glob("conv_*/*.json"))
+        return [json.loads(p.read_text(encoding="utf-8")) for p in paths]
 
     return _read

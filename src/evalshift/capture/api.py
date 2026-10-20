@@ -29,6 +29,7 @@ from evalshift.capture.generation import sanitize_generation_config
 from evalshift.capture.span import SpanTree, is_persistable
 from evalshift.capture.toolset import fingerprint_tools, normalize_tools
 from evalshift.redaction import Redactor, RedactSetting, resolve_redactor
+from evalshift.sinks._layout import writing_flat
 from evalshift.trace.serialize import build_capture
 
 P = ParamSpec("P")
@@ -255,6 +256,7 @@ def _finalize(
     conversation_id: str | None = None,
     turn_index: int | None = None,
     parent_capture_id: str | None = None,
+    flat: bool = False,
 ) -> None:
     # Opt-in persistence gate (configure(require_model_call=True)): a capture with no
     # model_call span carries no scoreable ground truth and cannot be promoted by the CLI
@@ -281,7 +283,9 @@ def _finalize(
     )
     if envelope is None:
         return
-    with safety.fail_open("sink write"):
+    # ``flat``: write outside any conversation folder (the decorator path, R10). The fail-open
+    # guard stays outermost so nothing in the layout override can raise into the host.
+    with safety.fail_open("sink write"), writing_flat() if flat else nullcontext():
         config.active_sink().write(envelope)
 
 
@@ -493,6 +497,8 @@ def _run_agent(
                 conversation_id=conversation_id,
                 turn_index=turn_index,
                 parent_capture_id=parent_capture_id,
+                # the decorator's conversation_id is static: it names no conversation (D1/D4)
+                flat=True,
             )
             raise
         else:
@@ -506,6 +512,8 @@ def _run_agent(
                 conversation_id=conversation_id,
                 turn_index=turn_index,
                 parent_capture_id=parent_capture_id,
+                # the decorator's conversation_id is static: it names no conversation (D1/D4)
+                flat=True,
             )
             return result
 
@@ -548,6 +556,8 @@ async def _run_agent_async(
                 conversation_id=conversation_id,
                 turn_index=turn_index,
                 parent_capture_id=parent_capture_id,
+                # the decorator's conversation_id is static: it names no conversation (D1/D4)
+                flat=True,
             )
             raise
         else:
@@ -561,6 +571,8 @@ async def _run_agent_async(
                 conversation_id=conversation_id,
                 turn_index=turn_index,
                 parent_capture_id=parent_capture_id,
+                # the decorator's conversation_id is static: it names no conversation (D1/D4)
+                flat=True,
             )
             return result
 
