@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import os
+import random
+import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -122,6 +125,7 @@ def test_unlink_failure_on_one_file_does_not_abort_rest(
 
 CONV_A = "conv_" + "a" * 16
 CONV_B = "conv_" + "b" * 16
+CONV_C = "conv_" + "c" * 16
 
 
 def _turns(directory: Path, folder: str, *mtimes: float) -> list[Path]:
@@ -130,12 +134,17 @@ def _turns(directory: Path, folder: str, *mtimes: float) -> list[Path]:
     return [_make(conv, f"cap_{folder[-2:]}_{i}.json", mtime=m) for i, m in enumerate(mtimes)]
 
 
-def test_an_older_conversation_is_evicted_whole(tmp_path: Path) -> None:
-    old = _turns(tmp_path, CONV_A, 100.0, 101.0, 102.0)
+def test_the_boundary_conversation_keeps_its_newest_turns_and_older_ones_go_whole(
+    tmp_path: Path,
+) -> None:
+    oldest = _turns(tmp_path, CONV_C, 50.0, 60.0)
+    boundary = _turns(tmp_path, CONV_A, 100.0, 101.0, 102.0)
     new = _turns(tmp_path, CONV_B, 200.0, 201.0)
     removed = gc.evict(tmp_path, max_captures=4, capture_ttl_seconds=None, now_ts=1000.0)
-    assert set(removed) == set(old)  # 2 + 3 > 4: the older conversation goes, not single turns
-    assert not (tmp_path / CONV_A).exists()
+    # B is kept whole (2), A keeps the 2 newest turns that still fit, C goes whole.
+    assert set(removed) == {*oldest, boundary[0]}
+    assert not (tmp_path / CONV_C).exists()
+    assert boundary[1].exists() and boundary[2].exists()
     assert all(p.exists() for p in new)
 
 
@@ -173,3 +182,77 @@ def test_a_folder_that_is_not_a_conversation_is_never_touched(tmp_path: Path) ->
     _make(tmp_path, "cap_new.json", mtime=200.0)
     gc.evict(tmp_path, max_captures=1, capture_ttl_seconds=1.0, now_ts=1000.0)
     assert keep.exists()
+
+
+def test_the_count_is_of_what_the_ttl_leaves(tmp_path: Path) -> None:
+    # A's turn at 100 is past the TTL; counting it would push A out beside the flat capture.
+    a = _turns(tmp_path, CONV_A, 100.0, 900.0)
+    flat = _make(tmp_path, "cap_flat.json", mtime=950.0)
+    removed = gc.evict(tmp_path, max_captures=2, capture_ttl_seconds=500.0, now_ts=1000.0)
+    assert removed == [a[0]]
+    assert a[1].exists() and flat.exists()
+
+
+def test_one_newer_capture_does_not_evict_a_conversation_at_the_cap(tmp_path: Path) -> None:
+    turns = _turns(tmp_path, CONV_A, *(100.0 + i for i in range(5)))
+    flat = _make(tmp_path, "cap_flat.json", mtime=200.0)
+    removed = gc.evict(tmp_path, max_captures=5, capture_ttl_seconds=None, now_ts=1000.0)
+    assert removed == [turns[0]]  # the conversation keeps its newest cap - 1 turns
+    assert flat.exists() and all(p.exists() for p in turns[1:])
+
+
+def _scandir_failing_for(name: str, *, vanish: bool = False) -> Any:
+    real = os.scandir
+
+    def fake(path: Any = ".") -> Any:
+        if isinstance(path, (str, os.PathLike)) and Path(path).name == name:
+            if not vanish:
+                raise PermissionError(f"denied: {path}")
+            shutil.rmtree(path)  # gone between the suite scan and this one
+        return real(path)
+
+    return fake
+
+
+@pytest.mark.parametrize("vanish", [False, True])
+def test_an_unreadable_or_vanished_folder_does_not_stop_the_rest_of_the_gc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vanish: bool
+) -> None:
+    blocked = _turns(tmp_path, CONV_B, 10.0, 20.0)  # oldest; skipped, never counted
+    old = _make(tmp_path, "cap_old.json", mtime=100.0)
+    conv = _turns(tmp_path, CONV_A, 150.0, 160.0)
+    new = _make(tmp_path, "cap_new.json", mtime=200.0)
+    monkeypatch.setattr(os, "scandir", _scandir_failing_for(CONV_B, vanish=vanish))
+    removed = gc.evict(tmp_path, max_captures=2, capture_ttl_seconds=None, now_ts=1000.0)
+    assert removed == [old, conv[0]]
+    assert new.exists() and conv[1].exists()
+    assert all(p.exists() for p in blocked) is not vanish
+
+
+def _keep_newest_after_ttl(
+    files: list[tuple[float, Path]], cap: int | None, ttl: float | None, now: float
+) -> set[Path]:
+    alive = sorted(f for f in files if ttl is None or now - f[0] <= ttl)
+    return {path for _, path in (alive if cap is None else alive[max(len(alive) - cap, 0) :])}
+
+
+def test_flat_only_suites_keep_the_newest_n_after_the_ttl(tmp_path: Path) -> None:
+    rng = random.Random(20261021)
+    for case in range(300):
+        directory = tmp_path / f"case_{case}"
+        directory.mkdir()
+        # Integer mtimes from a small range force ties, so the tie order is checked too.
+        files = [
+            (m, _make(directory, f"cap_{i:03d}.json", mtime=m))
+            for i, m in enumerate(float(rng.randint(0, 50)) for _ in range(rng.randint(0, 25)))
+        ]
+        cap = rng.choice([None, *range(1, 30)])
+        ttl = rng.choice([None, float(rng.randint(0, 60))])
+        if cap is None and ttl is None:
+            cap = rng.randint(1, 30)
+        now = 50.0
+        expected = _keep_newest_after_ttl(files, cap, ttl, now)
+        removed = gc.evict(directory, max_captures=cap, capture_ttl_seconds=ttl, now_ts=now)
+        survivors = set(directory.glob("*.json"))
+        assert survivors == expected, (case, cap, ttl)
+        assert set(removed) == {p for _, p in files} - expected, (case, cap, ttl)
