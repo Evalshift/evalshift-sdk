@@ -47,6 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Folders left empty are removed.
   Suites with only flat captures behave as before. Dedup is unchanged: its
   hash already includes the conversation and turn.
+- The PyPI project page's Homepage link goes to <https://www.evalshift.dev> instead of the
+  GitHub repo, and a Documentation link to <https://www.evalshift.dev/docs/sdk> is added.
 
 ## [0.6.0] - 2026-10-11
 
