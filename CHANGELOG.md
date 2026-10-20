@@ -18,26 +18,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixed when it is applied (its envelope still carries the id). **Requires
   evalshift CLI 1.6.0 or later, so upgrade the CLI first**: older CLIs do not
   see the folders, and their `capture clean` can sweep toolset sidecars that
-  only folder captures use. Code that globs `captures/<suite>/*.json` must
-  also read `captures/<suite>/conv_*/*.json`. Set
-  `EVALSHIFT_CAPTURE_LAYOUT=flat` (or pass `layout="flat"` to `FileSink` /
-  `ObjectStoreSink`) to keep the 0.6 layout.
+  only folder captures use. If an evalshift CLI older than 1.6 is installed
+  in the same environment, the SDK writes flat and logs a warning (set
+  `EVALSHIFT_CAPTURE_LAYOUT=conversation` to override); an older CLI in a
+  *different* environment (e.g. CI pinned to 1.5) can't be detected, so
+  upgrade it first. Code that globs `captures/<suite>/*.json` must also read
+  `captures/<suite>/conv_*/*.json`. Set `EVALSHIFT_CAPTURE_LAYOUT=flat` (or
+  pass `layout="flat"` to `FileSink` / `ObjectStoreSink`) to keep the 0.6
+  layout.
 - **Sampling keeps conversations whole.** With `EVALSHIFT_SAMPLE_RATE` set,
   a `capture.agent_session` (or `agent_session_async`) given a
   `conversation_id` is sampled by a hash of that id, so every turn of a
   conversation is captured or none is, in every process. The
-  `@capture.agent` decorator (whose `conversation_id` is fixed when it is
-  applied), runs without an id, and the LangChain handler still draw at
-  random.
+  `conversation_id` is what gets sampled: a user id passed as
+  `conversation_id` samples users, and a constant id in `agent_session`
+  keeps every run or none. The `@capture.agent` decorator (whose
+  `conversation_id` is fixed when it is applied), runs without an id, and
+  the LangChain handler still draw at random.
 - **`max_captures` / `capture_ttl` count conversations.** Each suite
-  directory is capped by unit, a standalone capture or a whole conversation
-  folder, so older conversations are evicted whole rather than turn by turn,
-  a live one too when it no longer fits beside the newer ones. The newest
-  one keeps its newest `max_captures` turns, so a conversation that never
-  ends (a user id passed as `conversation_id`) stays bounded. `capture_ttl`
-  still evicts every capture older than it, and folders left empty are
-  removed. Suites with only standalone captures behave as before. Dedup is
-  unchanged: its hash already includes the conversation and turn.
+  directory is capped by unit, a flat capture or a whole conversation
+  folder. `capture_ttl` first evicts every capture older than it;
+  `max_captures` then counts the captures the TTL leaves, newest unit first:
+  the newest conversations are kept whole while they fit, the one at the
+  boundary keeps its newest turns, and older ones are evicted whole. So one
+  newer capture evicts at most one older capture, not a whole live
+  conversation, and a conversation that never ends (a user id passed as
+  `conversation_id`) keeps its newest `max_captures` turns and stays bounded.
+  Folders left empty are removed.
+  Suites with only flat captures behave as before. Dedup is unchanged: its
+  hash already includes the conversation and turn.
 
 ## [0.6.0] - 2026-10-11
 

@@ -93,9 +93,11 @@ lowercase hex digits of `sha256(str(conversation_id))`: fixed length, safe on ev
 and never the raw id. Every other capture, including every `@capture.agent` decorator capture
 (its static `conversation_id` names no conversation), stays at `captures/<suite>/cap_<hex>.json`;
 the decorator's envelope still carries the id. The layout is the same on disk and in an object
-store. Reading the folders needs evalshift CLI 1.6.0 or later. `EVALSHIFT_CAPTURE_LAYOUT=flat`
-(or `layout="flat"` on `FileSink` / `ObjectStoreSink`) writes every capture flat, as before
-0.7.0. Rationale: `docs/DECISIONS.md` D-conv-layout.
+store. Reading the folders needs evalshift CLI 1.6.0 or later: if an older evalshift CLI is
+installed in the same environment, the SDK writes flat and logs a warning
+(`EVALSHIFT_CAPTURE_LAYOUT=conversation` overrides it). `EVALSHIFT_CAPTURE_LAYOUT=flat` (or
+`layout="flat"` on `FileSink` / `ObjectStoreSink`) writes every capture flat, as before 0.7.0.
+Rationale: `docs/DECISIONS.md` D-conv-layout.
 
 ### The messages-list convention for `model_call.input`
 

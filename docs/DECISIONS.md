@@ -205,8 +205,9 @@ exactly as in Phases 0-5; `active_sink()` returns the bare sink with identity pr
     tar-extract) can perturb eviction order. `capture_ttl` is in **seconds**.
     *Amended by D-conv-layout:* GC works per suite dir, by unit: a flat capture, or a whole
     `conv_<16 hex>/` conversation folder timed by its newest file's mtime (one more `os.scandir`
-    per folder, still no JSON parse); older units are evicted whole, and a folder left empty is
-    removed.
+    per folder, still no JSON parse). The TTL goes first; the count then keeps the newest units
+    whole while they fit, the unit at the boundary keeps its newest turns, older units are evicted
+    whole, and a folder left empty is removed.
 - **Verified by:** `tests/test_hygiene_{sample,dedup,gc,sink}.py`, `tests/test_capture_sampling.py`,
   `tests/test_capture_hygiene_e2e.py`, and the hygiene fault matrix added to
   `tests/test_capture_failopen.py` + `tests/test_capture_async_failopen.py`.
@@ -223,8 +224,9 @@ from the environment (no code change required):
   use never loses recent data, but runaway accumulation is capped. Dedup-on only collapses
   *identical-input* re-runs (the same best-effort per-process key as D-6) — a free win against the
   re-run-the-same-eval churn pattern. *Amended by D-conv-layout:* the 200 are counted per suite
-  dir, by unit: a capture or a whole conversation folder, so an older conversation is evicted
-  whole and the newest keeps its newest 200 turns.
+  dir, by unit: a capture or a whole conversation folder, among the captures the TTL leaves. The
+  newest conversations are kept whole while they fit, the one at the boundary keeps its newest
+  turns, and older ones are evicted whole.
 - **Env vars set the default** (read at `_Config` construction and re-read on `reset_config()`):
   `EVALSHIFT_MAX_CAPTURES`, `EVALSHIFT_CAPTURE_TTL`, `EVALSHIFT_DEDUP`, `EVALSHIFT_SAMPLE_RATE`.
   For the numeric knobs, `0` / `none` / `unlimited` means **uncapped** (`None`); a malformed value
@@ -597,7 +599,7 @@ with the value so every `SinkConfigurationError` names the one the user set.
 
 ## Conversation folders (D-conv-layout)
 
-### D-conv-layout (2026-10-20) — a conversation's turns share one folder, and sampling and GC keep it whole
+### D-conv-layout (2026-10-20) — a conversation's turns share one folder, sampling keeps it whole, and GC keeps the newest ones whole
 **Problem.** Until 0.7.0 every capture was a flat `captures/<suite>/cap_<hex>.json`, one file per
 turn, so nothing in the layout said which files form a conversation; only the envelope's
 `conversation_id` did, and reading it means parsing every file. Each piece that works per file
@@ -607,7 +609,7 @@ while its later ones stayed. And the CLI's per-suite budgets cut a bucket or a s
 boundary, so they could take a conversation's later turns without its first. Each gap leaves the
 CLI rebuilding a turn whose earlier turns are missing.
 
-**Decision.** A capture whose envelope has a `conversation_id` lives at
+**Decision.** An `agent_session` / `agent_session_async` turn with a `conversation_id` lives at
 `captures/<safe_suite>/conv_<16 hex>/<capture_id>.json`, where the folder is `conv_` plus the first
 16 hex digits of `sha256(str(conversation_id))` (`sinks/_layout.py`): lowercase, fixed length,
 safe on every filesystem, and never the raw id, which can carry `:` or a user id. Every other
@@ -618,20 +620,26 @@ a `conversation_id` (`api._finalize(flat=True)` wraps the write in `writing_flat
 fixed when the function is decorated, so it names no conversation, and its runs would make one
 never-ending folder that is the whole suite. Their envelope still carries the id.
 `EVALSHIFT_CAPTURE_LAYOUT=flat` (any case, stripped) or `layout="flat"` on `FileSink` /
-`ObjectStoreSink` writes every capture flat; the argument wins over the env var, and anything
-else means the folder layout, so a typo can never stop captures. With a sample rate,
+`ObjectStoreSink` writes every capture flat; `EVALSHIFT_CAPTURE_LAYOUT=conversation` or
+`layout="conversation"` writes the folder layout; the argument wins over the env var. With
+neither (unset, empty or a typo, so a typo can never stop captures), the SDK writes the folder
+layout unless an evalshift CLI older than 1.6 is installed in the same environment (see
+Compatibility). With a sample rate,
 `agent_session` / `agent_session_async` given a `conversation_id` draw
 `conversation_draw(conversation_id)` (`hygiene/sample.py`: 64 bits of
 `sha256("evalshift-sample:" + id)`), so a conversation is kept or dropped whole in every process;
 the decorator, runs without an id and the LangChain handler draw `random.random()`.
 `max_captures` / `capture_ttl` work per suite dir, by unit: a flat capture, or a whole `conv_*`
-folder timed by its newest file's mtime (`hygiene/gc.py`). Walking units newest first, the
-newest keeps its newest `max_captures` files; older units are kept whole while the running count
-stays within `max_captures`, and the first that does not fit is evicted with every older one.
-The TTL still evicts every file older than it, so an idle conversation goes whole and a live one
-loses only its old turns. A folder left empty is removed, and a suite with only flat files
-behaves exactly as before. Dedup is unchanged: `input_hash` already folds in
-`conversation_id` and `turn_index` (`trace/serialize.py`), so it never drops a distinct turn.
+folder timed by its newest file's mtime (`hygiene/gc.py`). The TTL goes first: it evicts every
+file older than it, so an idle conversation goes whole and a live one loses only its old turns.
+The count then runs on the files the TTL leaves: units ordered newest first by their newest
+surviving file, the files within a unit newest first, and the first `max_captures` files in that
+order are kept. So the newest units are kept whole while they fit, the unit at the boundary keeps
+its newest turns that fit, and every older unit is evicted whole. A folder or file GC cannot read
+(another uid, or gone mid-scan) is skipped, which only lowers the count. A folder left empty is
+removed, and a suite with only flat files behaves exactly as before (the newest `max_captures`).
+Dedup is unchanged: `input_hash` already folds in `conversation_id` and `turn_index`
+(`trace/serialize.py`), so it never drops a distinct turn.
 *Why not one mutable file per conversation:* object stores cannot append, so every turn would
 rewrite the whole object; turns of one conversation land on different processes (behind a load
 balancer, after a restart), whose read-modify-write cycles on the one file would race and lose
@@ -640,12 +648,14 @@ square of its length. One immutable file per turn keeps every write a single cre
 folder gives readers the grouping.
 
 **Trade-offs.** The newest unit keeps only its newest `max_captures` files, which is what keeps a
-never-ending conversation (an `agent_session` given a user id as its `conversation_id`) bounded;
-so a conversation longer than `max_captures`, or older than `capture_ttl`, loses its oldest turns
-locally, and the CLI then reports later rebuilt turns as missing earlier turns. That is the price
-of a bound; apps should pass the full messages list. A live conversation that is itself under the
-cap can still be evicted whole when the suite's conversations together exceed `max_captures`: the
-less recently written one goes. The decorator's static id keeps drawing at random, since
+never-ending conversation (an `agent_session` given a user id as its `conversation_id`) bounded.
+So a conversation longer than `max_captures`, or at the boundary of the count, or older than
+`capture_ttl`, loses its oldest turns locally, and older conversations go whole; the CLI then
+reports later rebuilt turns as missing earlier turns. That is the price of a bound; apps should
+pass the full messages list. Keeping the boundary conversation's newest turns, rather than
+evicting it whole, is what keeps one newer write from evicting more than one older capture (a
+conversation at the cap plus one newer flat capture keeps its newest `max_captures - 1` turns).
+The decorator's static id keeps drawing at random, since
 hashing it would capture every run or none, forever, and keeps writing flat, since its folder
 would hold the whole suite. And GC, or the CLI's
 `capture clean`, can remove a folder it has just emptied in the instant another process writes a
@@ -655,7 +665,14 @@ returns `None`, fail-open, and nothing is raised into the host.
 **Compatibility.** The CLI ships first: evalshift CLI 1.6.0 reads both layouts (`<suite>/*.json`,
 then `<suite>/conv_<16 hex>/*.json`, one level, never recursive), and SDK 0.7.0 requires
 evalshift CLI 1.6.0 or later. An older CLI does not see the folders, and its `capture clean` can
-sweep toolset sidecars that only folder captures use, so the CLI must be upgraded first. Code that globs `captures/<suite>/*.json` must also read `captures/<suite>/conv_*/*.json`.
+sweep toolset sidecars that only folder captures use, so the CLI must be upgraded first. CLI 1.5.x
+declares `evalshift-sdk>=0.4.0` with no upper bound, so installing it can pull SDK 0.7.0 in
+without the user choosing it. So if an evalshift CLI older than 1.6 is installed in the same
+environment (`importlib.metadata.version("evalshift")`, checked once per process, its leading
+`major.minor`), the SDK writes flat and logs a warning (set `EVALSHIFT_CAPTURE_LAYOUT=conversation`
+to override); an older CLI in a *different* environment (e.g. CI pinned to 1.5) can't be
+detected, so upgrade it first. A missing CLI or an unreadable version means no guard. Code that
+globs `captures/<suite>/*.json` must also read `captures/<suite>/conv_*/*.json`.
 `EVALSHIFT_CAPTURE_LAYOUT=flat` is the escape hatch: a production rollback lever and a bridge
 for tooling that globs the flat layout, with no code change. The envelope and `schema_version`
 are unchanged. Amends D-6, D-6a, D-toolset's GC note and D-stores in place. Verified by

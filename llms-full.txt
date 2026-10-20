@@ -17,7 +17,10 @@ agent_session_async turn with a conversation_id goes to
 captures/<suite>/conv_<16 hex>/cap_<hex>.json instead (hex = start of sha256(conversation_id));
 every other capture, including every @capture.agent decorator capture, stays flat.
 EVALSHIFT_CAPTURE_LAYOUT=flat (or layout="flat" on FileSink / ObjectStoreSink) writes every
-capture flat, as before 0.7.0.
+capture flat, as before 0.7.0. If an evalshift CLI older than 1.6 is installed in the same
+environment, the SDK writes flat and logs a warning (EVALSHIFT_CAPTURE_LAYOUT=conversation
+overrides it); an older CLI in a different environment (e.g. CI pinned to 1.5) can't be
+detected -- upgrade it first.
 Captures are consumed by the separate evalshift CLI
 (https://github.com/evalshift/evalshift-cli), which reads the folders from 1.6.0; the layout
 (captures/<suite>/cap_<hex>.json + captures/<suite>/conv_<16 hex>/cap_<hex>.json +
@@ -64,7 +67,7 @@ Safety model (four distinct rules):
 | EVALSHIFT_CAPTURE_TTL | off | Evict capture files older than N seconds. | Config construction |
 | EVALSHIFT_DEDUP | on | Per-process dedup keyed (suite, input_hash). | Config construction |
 | EVALSHIFT_SAMPLE_RATE | off (capture all) | Fraction of runs to capture (0.0-1.0), decided once per agent invocation; per conversation when an agent_session is given a conversation_id. | Config construction |
-| EVALSHIFT_CAPTURE_LAYOUT | unset (conversation folders) | "flat" (any case, stripped) writes every capture flat, as before 0.7.0; any other value means conversation folders. A layout= argument on FileSink / ObjectStoreSink wins over it. | Live, each write |
+| EVALSHIFT_CAPTURE_LAYOUT | unset (conversation folders) | "flat" (any case, stripped) writes every capture flat, as before 0.7.0; "conversation" writes conversation folders even when an evalshift CLI older than 1.6 is installed in the same environment. Unset or any other value means conversation folders, unless such an older CLI is installed alongside: then flat, with ONE warning per process. A layout= argument on FileSink / ObjectStoreSink wins over it. | Live, each write (installed-CLI check once per process) |
 | EVALSHIFT_CAPTURE_STORE | unset (disk) | Ship captures to s3://<bucket>/<prefix>, gs://<bucket>/<prefix> or az://<account>/<container>/<prefix>; needs the provider's client library (pip install boto3 / google-cloud-storage / azure-storage-blob azure-identity). Unusable value (library missing, bad URI) -> recorded at import, raised as SinkConfigurationError by the first capture.* decorator / client wrapper / LangChain handler / configure() while EVALSHIFT_CAPTURE is on; never on bare import, never with capture off; if the gate turns on later, captures are dropped with ONE warning (never written to disk instead). Message names the var, scheme and package, never the value. EVALSHIFT_SINK (0.5.0 name) still works when this is unset. | Config construction |
 
 "Uncapped/off" literal set for numeric knobs: {"0","none","unlimited","off"} (also empty string).
@@ -245,7 +248,10 @@ FileSink(base: str | os.PathLike[str] | None = None, *,
   .write(envelope) -> Path | None. Writes <base>/captures/<suite>/<capture_id>.json (UTF-8
   JSON), or <base>/captures/<suite>/conv_<16 hex>/<capture_id>.json for an agent_session turn
   with a conversation_id (decorator captures always flat). layout="flat" or
-  EVALSHIFT_CAPTURE_LAYOUT=flat -> every capture flat; the argument wins over the env var.
+  EVALSHIFT_CAPTURE_LAYOUT=flat -> every capture flat; layout="conversation" or
+  EVALSHIFT_CAPTURE_LAYOUT=conversation -> folders; the argument wins over the env var. With
+  neither: folders, unless an evalshift CLI older than 1.6 is installed in the same environment
+  (then flat, ONE warning per process).
   Base resolution AT WRITE TIME: constructor arg > EVALSHIFT_DIR > ".evalshift" relative
   to CWD. Returns absolute Path, or None on OSError (capture dropped, debug log). Suite segment
   sanitized against path traversal (separators and ".." replaced).
@@ -443,17 +449,20 @@ evalshift.capture.requested.extract_requested_tool_calls(response: Any) -> list[
 - Hygiene defaults: dedup ON, max_captures 200/suite, TTL off, sampling off. Escape hatch:
   EVALSHIFT_MAX_CAPTURES=0 EVALSHIFT_DEDUP=off. GC runs only after a real disk write (Path
   returned), per suite dir, by unit: a capture or a whole conversation folder (conv_<16 hex>/,
-  timed by its newest file's mtime). Count rule, units newest first: the newest unit keeps its
-  newest max_captures files (a never-ending conversation -- a user id as conversation_id -- keeps
-  only its latest turns); older units are kept whole while the running count <= max_captures, and
-  the first that doesn't fit is evicted with every older one (so a live conversation goes whole
-  when it no longer fits beside the newer ones). TTL rule: every file older than capture_ttl goes
-  (an idle conversation goes whole, a live one loses only old turns). Emptied folders removed.
-  Flat-only suites behave exactly as before 0.7.0. Enters only conv_* folders, one level; never
-  raises.
+  timed by its newest file's mtime). TTL rule first: every file older than capture_ttl goes (an
+  idle conversation goes whole, a live one loses only old turns). Count rule on the files the TTL
+  leaves: units newest first (by newest surviving file), files within a unit newest first, keep
+  the first max_captures. So the newest conversations are kept whole while they fit, the one at
+  the boundary keeps its newest turns, older ones are evicted whole; one newer capture evicts at
+  most one older capture, not a whole live conversation; a never-ending conversation (a user id as conversation_id)
+  keeps only its newest max_captures turns. Emptied folders removed. A folder or file GC cannot
+  read is skipped (never counted, never removed). Flat-only suites behave exactly as before 0.7.0.
+  Enters only conv_* folders, one level; never raises.
 - Sampling: decided once per agent invocation; per conversation when an agent_session /
   agent_session_async is given a conversation_id (draw = sha256("evalshift-sample:" + id), so
-  every turn is kept or dropped together in every process). The decorator, runs without an id
+  every turn is kept or dropped together in every process). The conversation_id is what gets
+  sampled: a user id passed as conversation_id samples users, and a constant id in agent_session
+  keeps every run or none. The decorator, runs without an id
   and the LangChain handler draw random.random(). A fault in the draw -> capture.
 - require_model_call=True (opt-in): captures with no model_call event are dropped before
   redaction/serialization (debug log only).
@@ -470,8 +479,9 @@ evalshift.capture.requested.extract_requested_tool_calls(response: Any) -> list[
   logging.getLogger("evalshift") debug line. Gate-off, sampling, and dedup drops are silent.
 - Deliberate WARNING-level exceptions to debug-only logging: an invalid/unusable EVALSHIFT_CAPTURE_STORE
   (once, at config construction), the first failed put per ObjectStoreSink, an ObjectStoreSink
-  exit flush that times out with items pending, and a newer-minor schema read by
-  load_capture/load_envelope.
+  exit flush that times out with items pending, a newer-minor schema read by
+  load_capture/load_envelope, and (once per process) writing flat because an evalshift CLI older
+  than 1.6 is installed in the same environment.
 - retrieval / guardrail / final_output event types exist in the schema but have NO public
   recording API in the manual surface; only the LangChain adapter (retrieval, final_output) and
   internals emit them. Do not document them as user-recordable.
@@ -492,7 +502,8 @@ Path: <base>/captures/<suite>/<capture_id>.json  (capture_id = "cap_" + uuid4 he
   agent_session_async turn with a conversation_id; conv_ + the first 16 lowercase hex of
   sha256(str(conversation_id)), never the raw id (readers match conv_[0-9a-f]{16}). Decorator
   captures are always flat. EVALSHIFT_CAPTURE_LAYOUT=flat / layout="flat" -> every capture flat,
-  as before 0.7.0. Same relative layout under a store's prefix. The folder is not an envelope
+  as before 0.7.0; so does an evalshift CLI older than 1.6 installed in the same environment,
+  unless EVALSHIFT_CAPTURE_LAYOUT=conversation / layout="conversation". Same relative layout under a store's prefix. The folder is not an envelope
   field: the schema is unchanged.
 Toolset sidecars: <base>/toolsets/<fingerprint-hex-no-prefix>.json (see ToolsetSink above)
 
