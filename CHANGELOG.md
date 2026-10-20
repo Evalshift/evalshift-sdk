@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The PyPI project page's Homepage link goes to <https://www.evalshift.dev> instead of the
+  GitHub repo, and a Documentation link to <https://www.evalshift.dev/docs/sdk> is added.
+
 ## [0.6.0] - 2026-10-11
 
 ### Changed
