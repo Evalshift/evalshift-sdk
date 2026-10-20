@@ -90,3 +90,24 @@ def test_gc_fault_does_not_drop_write(tmp_path: Path, monkeypatch: pytest.Monkey
     path = sink.write(_env("a", "cap_1"))
     assert path is not None
     assert path.exists()  # capture still written despite GC blowing up
+
+
+def test_gc_caps_the_suite_across_conversation_folders(tmp_path: Path) -> None:
+    sink = HygieneSink(FileSink(base=tmp_path), dedup=False, max_captures=2, capture_ttl=None)
+    for i, conversation in enumerate(("c1", "c2", "c3")):
+        path = sink.write(
+            build_capture(
+                SpanTree(),
+                suite="s",
+                agent_input=f"q{i}",
+                capture_id=f"cap_{i}",
+                conversation_id=conversation,
+                turn_index=0,
+            )
+        )
+        assert path is not None
+        # Deterministic mtimes, oldest first: the next write's GC sees this one as older.
+        os.utime(path, (100.0 + i, 100.0 + i))
+    suite_dir = tmp_path / "captures" / "s"
+    assert sorted(p.name for p in suite_dir.glob("conv_*/*.json")) == ["cap_1.json", "cap_2.json"]
+    assert len(list(suite_dir.iterdir())) == 2  # the evicted conversation's folder is gone

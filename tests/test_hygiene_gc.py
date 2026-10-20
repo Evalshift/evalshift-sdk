@@ -118,3 +118,58 @@ def test_unlink_failure_on_one_file_does_not_abort_rest(
     removed = gc.evict(tmp_path, max_captures=1, capture_ttl_seconds=None, now_ts=1000.0)
     assert removed == [b]  # b removed despite a failing
     assert a.exists()  # the failing one survives, no exception raised
+
+
+CONV_A = "conv_" + "a" * 16
+CONV_B = "conv_" + "b" * 16
+
+
+def _turns(directory: Path, folder: str, *mtimes: float) -> list[Path]:
+    conv = directory / folder
+    conv.mkdir(parents=True, exist_ok=True)
+    return [_make(conv, f"cap_{folder[-2:]}_{i}.json", mtime=m) for i, m in enumerate(mtimes)]
+
+
+def test_an_older_conversation_is_evicted_whole(tmp_path: Path) -> None:
+    old = _turns(tmp_path, CONV_A, 100.0, 101.0, 102.0)
+    new = _turns(tmp_path, CONV_B, 200.0, 201.0)
+    removed = gc.evict(tmp_path, max_captures=4, capture_ttl_seconds=None, now_ts=1000.0)
+    assert set(removed) == set(old)  # 2 + 3 > 4: the older conversation goes, not single turns
+    assert not (tmp_path / CONV_A).exists()
+    assert all(p.exists() for p in new)
+
+
+def test_a_conversation_larger_than_the_cap_keeps_only_its_newest_turns(tmp_path: Path) -> None:
+    # A conversation that never ends (a static decorator id, a user id): disk stays bounded.
+    live = _turns(tmp_path, CONV_A, 300.0, 301.0, 302.0)
+    older = _make(tmp_path, "cap_flat.json", mtime=100.0)
+    removed = gc.evict(tmp_path, max_captures=2, capture_ttl_seconds=None, now_ts=1000.0)
+    assert removed == [older, live[0]]
+    assert live[1].exists() and live[2].exists()
+
+
+def test_ttl_evicts_every_old_file_so_an_idle_conversation_goes_whole(tmp_path: Path) -> None:
+    idle = _turns(tmp_path, CONV_A, 100.0, 110.0)
+    active = _turns(tmp_path, CONV_B, 100.0, 990.0)  # first turn old, latest recent
+    removed = gc.evict(tmp_path, max_captures=None, capture_ttl_seconds=500.0, now_ts=1000.0)
+    assert set(removed) == {*idle, active[0]}
+    assert not (tmp_path / CONV_A).exists()
+    assert active[1].exists()
+
+
+def test_flat_and_conversation_units_share_one_cap_oldest_first(tmp_path: Path) -> None:
+    flat_old = _make(tmp_path, "cap_old.json", mtime=50.0)
+    conv = _turns(tmp_path, CONV_A, 100.0, 150.0)
+    flat_new = _make(tmp_path, "cap_new.json", mtime=200.0)
+    removed = gc.evict(tmp_path, max_captures=3, capture_ttl_seconds=None, now_ts=1000.0)
+    assert removed == [flat_old]
+    assert flat_new.exists() and all(p.exists() for p in conv)
+
+
+def test_a_folder_that_is_not_a_conversation_is_never_touched(tmp_path: Path) -> None:
+    other = tmp_path / "nested"
+    other.mkdir()
+    keep = _make(other, "cap_x.json", mtime=1.0)
+    _make(tmp_path, "cap_new.json", mtime=200.0)
+    gc.evict(tmp_path, max_captures=1, capture_ttl_seconds=1.0, now_ts=1000.0)
+    assert keep.exists()

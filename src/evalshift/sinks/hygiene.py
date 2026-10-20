@@ -25,6 +25,7 @@ from pathlib import Path
 from evalshift import safety
 from evalshift.hygiene import dedup as dedup_registry
 from evalshift.hygiene import gc as capture_gc
+from evalshift.sinks._layout import is_conversation_dir
 from evalshift.sinks.base import Sink
 from evalshift.trace.models import CaptureEnvelope
 
@@ -76,8 +77,15 @@ class HygieneSink:
 
         if path is not None and (self._max_captures is not None or self._capture_ttl is not None):
             with safety.fail_open("gc"):
+                suite_dir = getattr(self._base, "suite_dir", None)
+                if callable(suite_dir):
+                    directory = suite_dir(envelope)
+                elif is_conversation_dir(path.parent.name):
+                    directory = path.parent.parent  # a custom sink that wrote a folder
+                else:
+                    directory = path.parent
                 capture_gc.evict(
-                    path.parent,
+                    directory,
                     max_captures=self._max_captures,
                     capture_ttl_seconds=self._capture_ttl,
                     now_ts=self._now(),
