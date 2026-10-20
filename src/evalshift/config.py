@@ -393,13 +393,17 @@ def flush_captures(timeout: float | None = None) -> bool:
     return True
 
 
-def should_capture_now() -> bool:
+def should_capture_now(conversation_id: str | None = None) -> bool:
     """Sampling decision for one agent run (read at agent entry). Fail-open: capture on fault.
 
-    A configured ``sample_rate`` decides the draw; a fault in the draw defaults to **capturing**
-    so a sampling bug never silently disables all telemetry.
+    A configured ``sample_rate`` decides the draw -- per conversation when ``conversation_id`` is
+    known, so its turns are kept or dropped together; a fault in the draw defaults to
+    **capturing** so a sampling bug never silently disables all telemetry.
     """
-    decision = safety.guard("sample decision", lambda: should_capture(_CONFIG.sample_rate))
+    decision = safety.guard(
+        "sample decision",
+        lambda: should_capture(_CONFIG.sample_rate, key=conversation_id),
+    )
     return decision is not False
 
 

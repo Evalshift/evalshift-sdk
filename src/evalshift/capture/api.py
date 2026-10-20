@@ -474,6 +474,7 @@ def _run_agent(
     turn_index: int | None = None,
     parent_capture_id: str | None = None,
 ) -> R:
+    # the decorator's conversation_id is static: sampled per run (D4)
     if not config.should_capture_now():
         return fn(*args, **kwargs)  # not sampled -> transparent pass-through (no tree built)
     tree = safety.guard("open session", SpanTree)
@@ -533,6 +534,7 @@ async def _run_agent_async(
 ) -> Any:
     # Async mirror of _run_agent. _record_error/_finalize are sync (Sink.write is sync), so the
     # async path reuses them verbatim — no await. Same fail-open + error-event-then-raise contract.
+    # the decorator's conversation_id is static: sampled per run (D4)
     if not config.should_capture_now():
         return await fn(*args, **kwargs)  # not sampled -> transparent pass-through (no tree)
     tree = safety.guard("open session", SpanTree)
@@ -857,7 +859,7 @@ class _Capture:
         if not config.is_capture_enabled():
             yield None
             return
-        if not config.should_capture_now():
+        if not config.should_capture_now(conversation_id):
             yield None
             return
         tree = safety.guard("open session", SpanTree)
@@ -924,7 +926,7 @@ class _Capture:
         if not config.is_capture_enabled():
             yield None
             return
-        if not config.should_capture_now():
+        if not config.should_capture_now(conversation_id):
             yield None
             return
         tree = safety.guard("open session", SpanTree)
