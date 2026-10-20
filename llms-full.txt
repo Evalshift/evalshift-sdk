@@ -12,9 +12,15 @@ Object stores: pip install boto3 (s3://) | google-cloud-storage (gs://) | azure-
 Purpose: in-process capture SDK for AI agents. Wraps agent invocations, tool calls, and model
 calls; records each run as a span tree; serializes to a JSON capture envelope written to
 <base>/captures/<suite>/cap_<hex>.json on local disk, or (EVALSHIFT_CAPTURE_STORE=s3://|gs://|az://...)
-to an object store the user owns -- never to EvalShift.
+to an object store the user owns -- never to EvalShift. A capture.agent_session /
+agent_session_async turn with a conversation_id goes to
+captures/<suite>/conv_<16 hex>/cap_<hex>.json instead (hex = start of sha256(conversation_id));
+every other capture, including every @capture.agent decorator capture, stays flat.
+EVALSHIFT_CAPTURE_LAYOUT=flat (or layout="flat" on FileSink / ObjectStoreSink) writes every
+capture flat, as before 0.7.0.
 Captures are consumed by the separate evalshift CLI
-(https://github.com/evalshift/evalshift-cli); the layout (captures/<suite>/cap_<hex>.json +
+(https://github.com/evalshift/evalshift-cli), which reads the folders from 1.6.0; the layout
+(captures/<suite>/cap_<hex>.json + captures/<suite>/conv_<16 hex>/cap_<hex>.json +
 toolsets/<hex>.json) is the interface between SDK and CLI, on disk or in a bucket.
 
 Quickstart (minimum working setup):
@@ -28,8 +34,10 @@ Quickstart (minimum working setup):
    @capture.tool.
 3. Run with EVALSHIFT_CAPTURE=1 set (capture is OFF by default — without it every wrapper is a
    pure pass-through and no file is written).
-4. Result: .evalshift/captures/<suite>/cap_<hex>.json appears in the CWD, ready for the
-   evalshift CLI. Full runnable code in "Minimal examples" below.
+4. Result: .evalshift/captures/<suite>/cap_<hex>.json appears in the CWD (a decorator capture
+   is always flat; an agent_session turn with a conversation_id lands in
+   captures/<suite>/conv_<16 hex>/), ready for the evalshift CLI. Full runnable code in
+   "Minimal examples" below.
 
 Safety model (four distinct rules):
 1. CAPTURE PATH IS FAIL-OPEN: every piece of SDK bookkeeping is guarded; a fault drops the
@@ -52,10 +60,11 @@ Safety model (four distinct rules):
 |---|---|---|---|
 | EVALSHIFT_CAPTURE | unset (OFF) | Master gate. Truthy set (case-insensitive, stripped): {"1","true","yes","on"}. Anything else = off. | Live, every call |
 | EVALSHIFT_DIR | ".evalshift" | Capture root dir. Relative paths resolve against CWD (no repo-root walk). | Live, each write |
-| EVALSHIFT_MAX_CAPTURES | 200 | Keep newest N *.json per suite dir (GC after each disk write, ordered by file mtime). | Config construction (import / reset_config) |
+| EVALSHIFT_MAX_CAPTURES | 200 | Keep newest N *.json per suite dir, by unit: a capture or a whole conversation folder (GC after each disk write, ordered by file mtime). | Config construction (import / reset_config) |
 | EVALSHIFT_CAPTURE_TTL | off | Evict capture files older than N seconds. | Config construction |
 | EVALSHIFT_DEDUP | on | Per-process dedup keyed (suite, input_hash). | Config construction |
-| EVALSHIFT_SAMPLE_RATE | off (capture all) | Fraction of runs to capture (0.0-1.0), decided once per agent invocation. | Config construction |
+| EVALSHIFT_SAMPLE_RATE | off (capture all) | Fraction of runs to capture (0.0-1.0), decided once per agent invocation; per conversation when an agent_session is given a conversation_id. | Config construction |
+| EVALSHIFT_CAPTURE_LAYOUT | unset (conversation folders) | "flat" (any case, stripped) writes every capture flat, as before 0.7.0; any other value means conversation folders. A layout= argument on FileSink / ObjectStoreSink wins over it. | Live, each write |
 | EVALSHIFT_CAPTURE_STORE | unset (disk) | Ship captures to s3://<bucket>/<prefix>, gs://<bucket>/<prefix> or az://<account>/<container>/<prefix>; needs the provider's client library (pip install boto3 / google-cloud-storage / azure-storage-blob azure-identity). Unusable value (library missing, bad URI) -> recorded at import, raised as SinkConfigurationError by the first capture.* decorator / client wrapper / LangChain handler / configure() while EVALSHIFT_CAPTURE is on; never on bare import, never with capture off; if the gate turns on later, captures are dropped with ONE warning (never written to disk instead). Message names the var, scheme and package, never the value. EVALSHIFT_SINK (0.5.0 name) still works when this is unset. | Config construction |
 
 "Uncapped/off" literal set for numeric knobs: {"0","none","unlimited","off"} (also empty string).
@@ -90,7 +99,9 @@ capture.agent(*, suite: str, redact: Redactor | bool, tools: Any, code_version: 
   re-read at every call, not frozen at decoration — enabling EVALSHIFT_CAPTURE after import
   works). Agent input auto-derived by binding call args to the signature ({param: value});
   binding failure falls back to {"args": [...], "kwargs": {...}}. Conversation kwargs are STATIC
-  (fixed at decoration time) — use agent_session for per-turn values.
+  (fixed at decoration time) — use agent_session for per-turn values. A static conversation_id
+  names no conversation, so decorator captures are ALWAYS written flat and sampled at random per
+  run, even with one; the envelope still carries the id.
 
 capture.agent_session(*, suite: str, redact: Redactor | bool, tools: Any, code_version: str = "",
                       agent_input: Any = None, conversation_id: str | None = None,
@@ -104,6 +115,8 @@ capture.agent_session(*, suite: str, redact: Redactor | bool, tools: Any, code_v
   rules): any JSON-able value; it is identity only — hashed as-is into the envelope input_hash
   (dedup key), never stored raw, and redaction does not apply to it. Recommended value: the full
   messages list. Recommended primitive for multi-turn conversations (fresh turn_index per with).
+  With a conversation_id: written to captures/<suite>/conv_<16 hex>/, and a sample rate keeps or
+  drops the conversation whole (hash of the id, same answer in every process).
 
 capture.agent_session_async(...)
   Identical params/behavior; `async with` form.
@@ -227,9 +240,13 @@ default_redactor(value: Any) -> Any
 Sink (protocol, @runtime_checkable, import from evalshift.sinks): write(envelope: CaptureEnvelope) -> Path | None
   (CaptureEnvelope imports from evalshift.trace)
 
-FileSink(base: str | os.PathLike[str] | None = None)
+FileSink(base: str | os.PathLike[str] | None = None, *,
+         layout: Literal["conversation", "flat"] | None = None)
   .write(envelope) -> Path | None. Writes <base>/captures/<suite>/<capture_id>.json (UTF-8
-  JSON). Base resolution AT WRITE TIME: constructor arg > EVALSHIFT_DIR > ".evalshift" relative
+  JSON), or <base>/captures/<suite>/conv_<16 hex>/<capture_id>.json for an agent_session turn
+  with a conversation_id (decorator captures always flat). layout="flat" or
+  EVALSHIFT_CAPTURE_LAYOUT=flat -> every capture flat; the argument wins over the env var.
+  Base resolution AT WRITE TIME: constructor arg > EVALSHIFT_DIR > ".evalshift" relative
   to CWD. Returns absolute Path, or None on OSError (capture dropped, debug log). Suite segment
   sanitized against path traversal (separators and ".." replaced).
 
@@ -243,8 +260,11 @@ MemorySink()
   every capture's toolset_ref stays unstamped and the CLI refuses to promote it. With an
   ObjectStoreSink the sidecar goes to the store instead.
 
-ObjectStoreSink(store: ObjectStore, *, background: bool = True, queue_size: int = 1000, flush_timeout: float = 10.0)
-  .write(envelope) -> None (keys: captures/<safe_suite>/<capture_id>.json; enqueued, daemon
+ObjectStoreSink(store: ObjectStore, *, background: bool = True, queue_size: int = 1000, flush_timeout: float = 10.0,
+                layout: Literal["conversation", "flat"] | None = None)
+  .write(envelope) -> None (keys: captures/<safe_suite>/<capture_id>.json, or
+  captures/<safe_suite>/conv_<16 hex>/<capture_id>.json for an agent_session turn with a
+  conversation_id -- the FileSink layout rule, same layout= / EVALSHIFT_CAPTURE_LAYOUT; enqueued, daemon
   thread uploads; queue full -> newest dropped, debug line). .write_toolset(normalized,
   fingerprint) -> str | None (toolsets/<hex>.json, once per process; sidecar goes to the SAME
   store, replacing the file-based ToolsetSink; None when not accepted -> toolset_ref left
@@ -257,7 +277,8 @@ ObjectStoreSink(store: ObjectStore, *, background: bool = True, queue_size: int 
   sys.exit(0)) or call evalshift.flush_captures(timeout) in your shutdown hook (never inside a
   signal handler: it can deadlock on the sink's lock); on Lambda call
   flush_captures() before returning or use background=False. No retry layer (clients retry).
-  GC/max_captures/capture_ttl do not apply -> bucket lifecycle rules. Dedup still applies.
+  GC/max_captures/capture_ttl do not apply -> bucket lifecycle rules (a rule expires each object
+  by its own age, so a live conversation's oldest turns can expire first). Dedup still applies.
 ObjectStore (protocol, evalshift.stores): put(key: str, data: bytes) -> None
 Stores (lazy client, built on first put): evalshift.stores.s3.S3Store(bucket, prefix="", *,
   client=None) [AWS_ENDPOINT_URL honoured -> MinIO/R2/B2]; evalshift.stores.gcs.GCSStore(bucket,
@@ -398,11 +419,13 @@ evalshift.capture.requested.extract_requested_tool_calls(response: Any) -> list[
   pass agent_input, or set conversation_id.
 - conversation_id set -> input_hash = hash({agent_input, conversation_id, turn_index}), so
   repeated short turns ("yes", "1pm") don't dedup-collapse. conversation_id=None -> input_hash =
-  hash(agent_input), byte-identical to pre-1.1.0.
+  hash(agent_input), byte-identical to pre-1.1.0. Conversation folders change nothing here:
+  dedup never drops a distinct turn.
 - The SDK never returns the written capture_id to the caller; parent_capture_id must be
   user-managed or omitted.
 - @capture.agent conversation kwargs are static per decoration; per-turn values require
-  agent_session / agent_session_async.
+  agent_session / agent_session_async. Decorator captures are always written flat and sampled at
+  random per run, even with a conversation_id.
 - Tool span -> 2 events (tool_call + tool_result). model_call/error spans -> 1 event each.
 - Event ordering: sort by (timestamp, monotonic op-order) -> dense sequence_index; deterministic
   under concurrency. Span timing/parentage stored under event.metadata["evalshift"].
@@ -419,7 +442,19 @@ evalshift.capture.requested.extract_requested_tool_calls(response: Any) -> list[
   model_call's output.
 - Hygiene defaults: dedup ON, max_captures 200/suite, TTL off, sampling off. Escape hatch:
   EVALSHIFT_MAX_CAPTURES=0 EVALSHIFT_DEDUP=off. GC runs only after a real disk write (Path
-  returned), orders by file mtime, never recurses, never raises.
+  returned), per suite dir, by unit: a capture or a whole conversation folder (conv_<16 hex>/,
+  timed by its newest file's mtime). Count rule, units newest first: the newest unit keeps its
+  newest max_captures files (a never-ending conversation -- a user id as conversation_id -- keeps
+  only its latest turns); older units are kept whole while the running count <= max_captures, and
+  the first that doesn't fit is evicted with every older one (so a live conversation goes whole
+  when it no longer fits beside the newer ones). TTL rule: every file older than capture_ttl goes
+  (an idle conversation goes whole, a live one loses only old turns). Emptied folders removed.
+  Flat-only suites behave exactly as before 0.7.0. Enters only conv_* folders, one level; never
+  raises.
+- Sampling: decided once per agent invocation; per conversation when an agent_session /
+  agent_session_async is given a conversation_id (draw = sha256("evalshift-sample:" + id), so
+  every turn is kept or dropped together in every process). The decorator, runs without an id
+  and the LangChain handler draw random.random(). A fault in the draw -> capture.
 - require_model_call=True (opt-in): captures with no model_call event are dropped before
   redaction/serialization (debug log only).
 - Redaction is REQUIRED at every capture point (agent decorator / agent_session /
@@ -444,12 +479,21 @@ evalshift.capture.requested.extract_requested_tool_calls(response: Any) -> list[
   distinct fingerprint by ToolsetSink (with an ObjectStoreSink: toolsets/<hex>.json in the store,
   once per process); a repeat write of the same toolset is a cheap no-op
   existence check, not a second write. GC (hygiene/gc.py) never touches this directory: its
-  caller always passes <base>/captures/<suite>/, a sibling, and evict() never recurses into
-  subdirectories regardless. No orphan sweeping exists for toolsets in this SDK.
+  caller always passes <base>/captures/<suite>/, a sibling, and evict() enters only
+  conv_<16 hex> conversation folders, one level, never any other subdirectory. No orphan
+  sweeping exists for toolsets in this SDK. An evalshift CLI older than 1.6.0 does not see
+  folder captures, so its `capture clean` can sweep sidecars only they use -- upgrade the CLI
+  first.
 
 ## Capture file format
 
 Path: <base>/captures/<suite>/<capture_id>.json  (capture_id = "cap_" + uuid4 hex)
+  or <base>/captures/<suite>/conv_<16 hex>/<capture_id>.json for an agent_session /
+  agent_session_async turn with a conversation_id; conv_ + the first 16 lowercase hex of
+  sha256(str(conversation_id)), never the raw id (readers match conv_[0-9a-f]{16}). Decorator
+  captures are always flat. EVALSHIFT_CAPTURE_LAYOUT=flat / layout="flat" -> every capture flat,
+  as before 0.7.0. Same relative layout under a store's prefix. The folder is not an envelope
+  field: the schema is unchanged.
 Toolset sidecars: <base>/toolsets/<fingerprint-hex-no-prefix>.json (see ToolsetSink above)
 
 Envelope keys (unchanged since schema 1.1.0, in order): schema_version, capture_id, suite,
@@ -544,6 +588,7 @@ for i, user_text in enumerate(turns):
         reply = run_model(messages)
         record_model_call(model_id="claude-sonnet-5", tools=[], input=messages, output=reply)
     messages.append({"role": "assistant", "content": reply})
+# Every turn -> .evalshift/captures/scheduler/conv_<16 hex of sha256(conv)>/cap_<hex>.json
 
 # 4. LangChain (pip install "evalshift-sdk[langchain]")
 from evalshift.adapters.langchain import EvalShiftCallbackHandler
@@ -609,7 +654,8 @@ except MigrationError as e:                 # read path raises; it does NOT fail
 ## Troubleshooting: no file written
 
 Check in order: (1) EVALSHIFT_CAPTURE not truthy; (2) wrong CWD — default .evalshift is
-CWD-relative, set EVALSHIFT_DIR; (3) dedup collapsed it (classic: agent_session without
+CWD-relative, set EVALSHIFT_DIR (an agent_session turn with a conversation_id is one level
+down, in captures/<suite>/conv_<16 hex>/); (3) dedup collapsed it (classic: agent_session without
 agent_input); (4) sampling skipped it; (5) require_model_call dropped it; (6) redactor raised
 (fail-closed); (7) filesystem OSError (use MemorySink on read-only mounts); (8) ObjectStoreSink
 dropped it -- nothing local, check the bucket and the logs: first failed put per sink -> WARNING

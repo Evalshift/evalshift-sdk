@@ -51,7 +51,7 @@ replay:
 
 | Field               | Type          | Default | Meaning |
 |----------------------|---------------|---------|---------|
-| `conversation_id`    | `str \| None` | `None`  | Shared identifier for every capture belonging to the same conversation. `None` for a standalone (single-turn) capture. |
+| `conversation_id`    | `str \| None` | `None`  | Shared identifier for every capture belonging to the same conversation. `None` for a standalone (single-turn) capture. Since SDK 0.7.0 it also picks the file's folder: an `agent_session` / `agent_session_async` turn with one is written to `captures/<suite>/conv_<16 hex>/cap_<hex>.json` (the hex is the start of `sha256(conversation_id)`); see [below](#where-a-conversations-turns-are-written). |
 | `turn_index`         | `int \| None` | `None`  | This capture's position in the conversation (0-based recommended; the SDK does not enforce an ordering). |
 | `parent_capture_id`  | `str \| None` | `None`  | The `capture_id` of the immediately preceding turn's capture, if any — lets a reader reconstruct turn order without relying on file mtimes. |
 
@@ -82,6 +82,20 @@ multi-turn conversation (a different `turn_index` per call), use `capture.agent_
 `capture.agent_session_async` instead and pass fresh values on each `with` / `async with`. There
 is no stateful `capture.conversation()` helper — turn identity is the caller's responsibility to
 track and pass in.
+
+### Where a conversation's turns are written
+
+The folder a capture lands in is derived from the envelope, not stored in it, so it needed no
+schema change (the envelope keys and `schema_version` are as above). Since SDK 0.7.0, a
+`capture.agent_session` / `agent_session_async` turn with a `conversation_id` is written to
+`captures/<suite>/conv_<16 hex>/cap_<hex>.json`, where the folder is `conv_` plus the first 16
+lowercase hex digits of `sha256(str(conversation_id))`: fixed length, safe on every filesystem,
+and never the raw id. Every other capture, including every `@capture.agent` decorator capture
+(its static `conversation_id` names no conversation), stays at `captures/<suite>/cap_<hex>.json`;
+the decorator's envelope still carries the id. The layout is the same on disk and in an object
+store. Reading the folders needs evalshift CLI 1.6.0 or later. `EVALSHIFT_CAPTURE_LAYOUT=flat`
+(or `layout="flat"` on `FileSink` / `ObjectStoreSink`) writes every capture flat, as before
+0.7.0. Rationale: `docs/DECISIONS.md` D-conv-layout.
 
 ### The messages-list convention for `model_call.input`
 
@@ -118,6 +132,10 @@ different turns of a conversation frequently share short, repeated user text —
   "conversation_id": conversation_id, "turn_index": turn_index})` — folding in the turn identity
   means two turns with identical `agent_input` text hash differently, so dedup no longer collapses
   them.
+
+Conversation folders (SDK 0.7.0) leave dedup unchanged: it still keys on `(suite, input_hash)`,
+and the hash already folds in `conversation_id` and `turn_index`, so dedup never drops a distinct
+turn.
 
 ## 2.0.0: per-call toolset fields, and no migration from 1.x
 

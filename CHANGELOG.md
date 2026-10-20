@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: conversation folders.** A `capture.agent_session` /
+  `agent_session_async` turn with a `conversation_id` is written to
+  `captures/<suite>/conv_<16 hex>/cap_<hex>.json`, on disk and in an object
+  store. The hex is the start of `sha256(conversation_id)`. Standalone
+  captures stay at `captures/<suite>/cap_<hex>.json`, and so does every
+  capture from the `@capture.agent` decorator, whose `conversation_id` is
+  fixed when it is applied (its envelope still carries the id). **Requires
+  evalshift CLI 1.6.0 or later, so upgrade the CLI first**: older CLIs do not
+  see the folders, and their `capture clean` can sweep toolset sidecars that
+  only folder captures use. Code that globs `captures/<suite>/*.json` must
+  also read `captures/<suite>/conv_*/*.json`. Set
+  `EVALSHIFT_CAPTURE_LAYOUT=flat` (or pass `layout="flat"` to `FileSink` /
+  `ObjectStoreSink`) to keep the 0.6 layout.
+- **Sampling keeps conversations whole.** With `EVALSHIFT_SAMPLE_RATE` set,
+  a `capture.agent_session` (or `agent_session_async`) given a
+  `conversation_id` is sampled by a hash of that id, so every turn of a
+  conversation is captured or none is, in every process. The
+  `@capture.agent` decorator (whose `conversation_id` is fixed when it is
+  applied), runs without an id, and the LangChain handler still draw at
+  random.
+- **`max_captures` / `capture_ttl` count conversations.** Each suite
+  directory is capped by unit, a standalone capture or a whole conversation
+  folder, so older conversations are evicted whole rather than turn by turn,
+  a live one too when it no longer fits beside the newer ones. The newest
+  one keeps its newest `max_captures` turns, so a conversation that never
+  ends (a user id passed as `conversation_id`) stays bounded. `capture_ttl`
+  still evicts every capture older than it, and folders left empty are
+  removed. Suites with only standalone captures behave as before. Dedup is
+  unchanged: its hash already includes the conversation and turn.
+
 ## [0.6.0] - 2026-10-11
 
 ### Changed
