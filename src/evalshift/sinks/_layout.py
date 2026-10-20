@@ -9,23 +9,42 @@ writes every capture flat, as before 0.7.0. The evalshift CLI reads both layouts
 Captures from the ``@capture.agent`` decorator always stay flat (:func:`writing_flat`): its
 ``conversation_id`` is fixed when the function is decorated, so it names no conversation.
 
+**Co-install guard.** An older evalshift CLI cannot see conversation folders, and a CLI 1.5.x
+install can pull this SDK in without the user choosing it. So when neither a sink's ``layout=``
+nor the env var picks a layout, and an evalshift CLI older than 1.6 is installed in this
+environment, captures are written flat and one warning is logged per process.
+``EVALSHIFT_CAPTURE_LAYOUT=conversation`` opts in anyway. A CLI in another environment (CI pinned
+to 1.5, say) cannot be detected.
+
 Stdlib only (D-deps).
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import logging
 import os
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from importlib import metadata
 from typing import Literal
 
 CaptureLayout = Literal["conversation", "flat"]
 
-#: Env var selecting the layout; only ``flat`` (any case, stripped) changes it.
+#: Env var selecting the layout: ``flat`` or ``conversation`` (any case, stripped).
 LAYOUT_ENV = "EVALSHIFT_CAPTURE_LAYOUT"
+
+#: The first evalshift CLI (``major``, ``minor``) that reads conversation folders.
+_FIRST_FOLDER_CLI = (1, 6)
+
+#: The leading ``major.minor`` of a version string; ``1.6.0rc1`` and ``1.6.0.dev0`` count as 1.6.
+_VERSION = re.compile(r"(\d+)\.(\d+)")
+
+#: The SDK's logger (the one :mod:`evalshift.safety` uses), by name: this module is stdlib-only.
+_log = logging.getLogger("evalshift")
 
 _CONVERSATION_DIR = re.compile(r"conv_[0-9a-f]{16}")
 
@@ -60,18 +79,62 @@ def writing_flat() -> Iterator[None]:
         _FLAT_WRITE.reset(token)
 
 
-def resolve_layout(explicit: CaptureLayout | None = None) -> CaptureLayout:
-    """The layout to write: ``flat`` inside :func:`writing_flat`, else ``explicit`` if given,
-    else ``flat`` when the env var says so.
+def _cli_version() -> str:
+    """The installed evalshift CLI's version; raises ``PackageNotFoundError`` when it is absent.
 
-    Anything other than ``flat`` -- unset, empty, ``conversation`` or a typo -- means
-    ``conversation``, the default, so a bad value can never stop captures.
+    The CLI distribution is ``evalshift`` (this SDK's is ``evalshift-sdk``).
+    """
+    return metadata.version("evalshift")
+
+
+@functools.cache
+def _guard_layout() -> CaptureLayout:
+    """``flat`` when an evalshift CLI older than 1.6 is installed alongside, else ``conversation``.
+
+    Computed once per process (``cache_clear()`` resets it), so the one warning is logged once.
+    Anything unreadable -- no CLI, an odd version string, a failing lookup -- means no guard.
+    """
+    try:
+        version = _cli_version()
+        match = _VERSION.match(version)
+        if match is None or (int(match[1]), int(match[2])) >= _FIRST_FOLDER_CLI:
+            return "conversation"
+        _log.warning(
+            "evalshift: the installed evalshift CLI %s can't read conversation folders, so "
+            "captures are written flat; upgrade the CLI to 1.6.0 or set "
+            "EVALSHIFT_CAPTURE_LAYOUT=conversation",
+            version,
+        )
+        return "flat"
+    except Exception:  # never let the guard stop a capture
+        return "conversation"
+
+
+def resolve_layout(explicit: CaptureLayout | None = None) -> CaptureLayout:
+    """The layout to write, first match wins.
+
+    1. ``flat`` inside :func:`writing_flat`;
+    2. ``explicit``, when a sink was given ``layout=``;
+    3. the env var, when it says ``flat`` or ``conversation`` (any case, stripped) -- so
+       ``conversation`` is the explicit opt-in that overrides the guard;
+    4. else (unset, empty or a typo) the co-install guard: ``flat`` when an evalshift CLI older
+       than 1.6 is installed in this environment (one warning per process), else
+       ``conversation``.
+
+    Never raises, so a bad value can never stop captures. A sink must call this synchronously
+    inside ``write()``: :func:`writing_flat` is a context variable, so a call made later (on a
+    background thread, say) would not see it.
     """
     if _FLAT_WRITE.get():
         return "flat"
     if explicit is not None:
         return explicit
-    return "flat" if os.environ.get(LAYOUT_ENV, "").strip().lower() == "flat" else "conversation"
+    raw = os.environ.get(LAYOUT_ENV, "").strip().lower()
+    if raw == "flat":
+        return "flat"
+    if raw == "conversation":
+        return "conversation"
+    return _guard_layout()
 
 
 __all__ = [

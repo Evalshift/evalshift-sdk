@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 import pytest
 
 from evalshift.config import reset_config
+from evalshift.sinks import _layout
 
 CaptureReader = Callable[[str], list[dict[str, Any]]]
 
@@ -21,7 +23,16 @@ def _isolate_config(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     The hygiene knobs now default from env vars, so clear them first: the test-suite baseline must
     be the built-in defaults (dedup on, max_captures=200) regardless of the developer's shell env.
     Tests that exercise a specific env value ``monkeypatch.setenv(...)`` then ``reset_config()``.
+
+    The co-install guard (R11) must not depend on whether an evalshift CLI happens to be
+    installed: by default it sees none, so the layout stays ``conversation``.
     """
+
+    def _no_cli() -> str:
+        raise importlib.metadata.PackageNotFoundError("evalshift")
+
+    monkeypatch.setattr(_layout, "_cli_version", _no_cli)
+    _layout._guard_layout.cache_clear()
     for var in (
         "EVALSHIFT_MAX_CAPTURES",
         "EVALSHIFT_CAPTURE_TTL",
@@ -35,6 +46,7 @@ def _isolate_config(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     reset_config()
     yield
     reset_config()
+    _layout._guard_layout.cache_clear()
 
 
 @pytest.fixture

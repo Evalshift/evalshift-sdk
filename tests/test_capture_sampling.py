@@ -154,6 +154,29 @@ def test_a_conversation_is_sampled_whole(
     assert sorted(c["turn_index"] for c in kept) == [0, 1, 2]
 
 
+async def test_an_async_conversation_is_sampled_whole(
+    capturing: Path, read_captures: CaptureReader, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The async twin of the test above: same rate, same ids, same random draws.
+    configure(sample_rate=0.55)
+    draws = iter([0.0, 0.99, 0.0, 0.99, 0.0, 0.99])
+    monkeypatch.setattr("random.random", lambda: next(draws))
+    for conversation in ("planner:session-1", "c1"):
+        for turn in range(3):
+            async with capture.agent_session_async(
+                suite="s",
+                redact=False,
+                agent_input=f"{conversation} {turn}",
+                conversation_id=conversation,
+                turn_index=turn,
+                tools=[],
+            ):
+                record_model_call(model_id="m", tools=[])
+    kept = read_captures("s")
+    assert {c["conversation_id"] for c in kept} == {"planner:session-1"}
+    assert sorted(c["turn_index"] for c in kept) == [0, 1, 2]
+
+
 def test_the_decorators_static_conversation_id_samples_at_random(
     capturing: Path, read_captures: CaptureReader, monkeypatch: pytest.MonkeyPatch
 ) -> None:
