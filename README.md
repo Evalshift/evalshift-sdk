@@ -8,6 +8,15 @@ own when the host's disk does not outlive it. The `evalshift` CLI reads those ca
 disk, or mirrors them down from the bucket; the layout is the interface, and the SDK and CLI
 never call each other.
 
+A `capture.agent_session` / `agent_session_async` turn with a `conversation_id` is written to
+`captures/<suite>/conv_<16 hex>/cap_<hex>.json`, where the hex is the start of
+`sha256(conversation_id)`; every other capture, including every `@capture.agent` decorator
+capture, is written to `captures/<suite>/cap_<hex>.json`. Reading the folders needs evalshift CLI
+1.6.0 or later: if an older evalshift CLI is installed in the same environment, the SDK writes
+flat and logs a warning (`EVALSHIFT_CAPTURE_LAYOUT=conversation` overrides it); an older CLI in a
+different environment can't be detected, so upgrade it first. `EVALSHIFT_CAPTURE_LAYOUT=flat` (or
+`layout="flat"` on `FileSink` / `ObjectStoreSink`) writes every capture flat, as before 0.7.0.
+
 - **Distribution:** `evalshift-sdk` · **import name:** `evalshift`
 - **Runtime deps:** none (stdlib-only)
 - **Python:** >= 3.10
@@ -86,15 +95,18 @@ client = wrap_openai(OpenAI())                          # OpenAI(base_url=...) c
 
 Capture writes one JSON file per sampled invocation, so `.evalshift/captures/` is kept bounded by
 default (no configuration needed): identical-input re-runs are de-duplicated, and each suite
-directory is capped at the **200 newest** captures (oldest evicted). Tune it with env vars — no code
-change required (precedence: an explicit `configure(...)` call > env var > built-in default):
+directory is capped at the **200 newest** captures the TTL leaves, counted by unit: a capture or
+a whole conversation folder. The newest conversations are kept whole while they fit, the one at
+the boundary keeps its newest turns, and older ones are evicted whole. Tune it with env vars — no
+code change required (precedence: an explicit `configure(...)` call > env var > built-in default):
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `EVALSHIFT_MAX_CAPTURES` | `200` | Max captures kept per suite dir. `0` / `none` / `unlimited` = uncapped. |
+| `EVALSHIFT_MAX_CAPTURES` | `200` | Max captures kept per suite dir, by unit: a capture or a whole conversation folder. `0` / `none` / `unlimited` = uncapped. |
 | `EVALSHIFT_DEDUP` | `on` | Collapse identical-input captures (per-process). `off` to disable. |
 | `EVALSHIFT_CAPTURE_TTL` | off | Evict captures older than N **seconds**. |
-| `EVALSHIFT_SAMPLE_RATE` | off | Capture only this fraction of runs, e.g. `0.25`. |
+| `EVALSHIFT_SAMPLE_RATE` | off | Capture only this fraction of runs, e.g. `0.25`; decided once per agent invocation; per conversation when an `agent_session` is given a `conversation_id`. |
+| `EVALSHIFT_CAPTURE_LAYOUT` | conversation folders (flat if an evalshift CLI older than 1.6 is installed alongside) | `flat` writes every capture flat, as before 0.7.0; `conversation` writes conversation folders even beside an older CLI. |
 | `EVALSHIFT_DIR` | `.evalshift` | Capture root directory. |
 
 A malformed value falls back to the default (these knobs never crash capture). To restore fully unbounded

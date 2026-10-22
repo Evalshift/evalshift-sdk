@@ -6,10 +6,12 @@ survive them -- Fargate tasks, Lambda environments, pods -- where a capture writ
 ``EVALSHIFT_CAPTURE_STORE=<uri>`` (see :mod:`evalshift.config`) or
 ``configure(sink=ObjectStoreSink(store))``.
 
-**Key layout is the local layout.** ``captures/<safe_suite>/<capture_id>.json`` and
-``toolsets/<hex>.json`` under the store's prefix -- byte for byte what
-:class:`~evalshift.sinks.file.FileSink` and :class:`~evalshift.sinks.toolset.ToolsetSink`
-write, so the CLI mirrors a bucket into ``.evalshift/`` and reads it unchanged.
+**Key layout is the local layout.** ``captures/<safe_suite>/<capture_id>.json`` (or
+``captures/<safe_suite>/conv_<16 hex>/<capture_id>.json`` for a conversation's turns, see
+:mod:`evalshift.sinks._layout`) and ``toolsets/<hex>.json`` under the store's prefix -- byte for
+byte what :class:`~evalshift.sinks.file.FileSink` and
+:class:`~evalshift.sinks.toolset.ToolsetSink` write, so the CLI mirrors a bucket into
+``.evalshift/`` and reads it unchanged.
 
 **Background by default.** ``write`` enqueues and returns; one daemon thread drains the queue
 with ``store.put``. The queue is bounded (``queue_size``); when it is full the incoming item is
@@ -49,11 +51,12 @@ from pathlib import Path
 from typing import Any
 
 from evalshift.safety import logger
-from evalshift.sinks.file import _safe_segment
+from evalshift.sinks._layout import CaptureLayout, resolve_layout
+from evalshift.sinks.file import capture_relpath
 from evalshift.sinks.toolset import toolset_payload
 from evalshift.stores.base import ObjectStore
 from evalshift.trace.models import CaptureEnvelope
-from evalshift.trace.serialize import capture_filename, dumps
+from evalshift.trace.serialize import dumps
 
 # (key, data, fingerprint): the fingerprint is set for toolset sidecars and ``None`` for captures,
 # so a failed background sidecar put can release it for retry.
@@ -70,8 +73,10 @@ class ObjectStoreSink:
         background: bool = True,
         queue_size: int = 1000,
         flush_timeout: float = 10.0,
+        layout: CaptureLayout | None = None,
     ) -> None:
         self._store = store
+        self._layout = layout
         self._background = background
         self._flush_timeout = flush_timeout
         self._queue: queue.Queue[_Item] = queue.Queue(maxsize=queue_size)
@@ -89,8 +94,10 @@ class ObjectStoreSink:
         return self._store
 
     def write(self, envelope: CaptureEnvelope) -> Path | None:
-        """Ship ``envelope`` under ``captures/<safe_suite>/<capture_id>.json``; return ``None``."""
-        key = f"captures/{_safe_segment(envelope.suite)}/{capture_filename(envelope.capture_id)}"
+        """Ship ``envelope`` under ``captures/<safe_suite>/<capture_id>.json``, or under
+        ``captures/<safe_suite>/conv_<16 hex>/<capture_id>.json`` for a conversation's turn;
+        return ``None``."""
+        key = f"captures/{capture_relpath(envelope, layout=resolve_layout(self._layout))}"
         self._submit(key, dumps(envelope).encode("utf-8"))
         return None
 

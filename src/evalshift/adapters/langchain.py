@@ -302,6 +302,7 @@ class EvalShiftCallbackHandler(BaseCallbackHandler):
         return root
 
     def _begin_session_locked(self, root: UUID, agent_input: Any) -> None:
+        # no conversation id here: sampled per run
         enabled = safety.guard(
             "langchain gate check",
             lambda: config.is_capture_enabled() and config.should_capture_now(),

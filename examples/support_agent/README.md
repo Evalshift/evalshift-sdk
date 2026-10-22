@@ -23,7 +23,9 @@ cd evalshift-sdk/examples/support_agent
 export EVALSHIFT_DIR="$PWD/.evalshift"
 
 # 1. capture (this checkout's SDK). Writes .evalshift/captures/support_demo/cap_*.json plus the
-#    content-addressed toolset sidecar .evalshift/toolsets/<sha256>.json.
+#    content-addressed toolset sidecar .evalshift/toolsets/<sha256>.json. The agent uses the
+#    @capture.agent decorator, whose captures are always flat; an agent_session turn with a
+#    conversation_id would go to .evalshift/captures/support_demo/conv_<16 hex>/ instead.
 EVALSHIFT_CAPTURE=1 uv run --project ../.. python agent.py
 
 # --- everything below uses the `evalshift` binary from the CLI ---
